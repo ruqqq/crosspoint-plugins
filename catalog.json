@@ -1,0 +1,19 @@
+{
+  "name": "ruqqq's Plugins",
+  "plugins": [
+    {
+      "name": "kopi",
+      "title": "Kopi",
+      "description": "Read your Kopi briefings on the device.",
+      "author": "ruqqq",
+      "version": "1.0.0",
+      "base": "https://raw.githubusercontent.com/ruqqq/crosspoint-plugins/main/kopi/",
+      "files": [
+        "manifest.json",
+        "device.json",
+        "plugin.js",
+        "README.md"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "title": "Kopi",
+  "config": {
+    "file": "/.crosspoint/kopi.json"
+  },
+  "browse": {
+    "format": "xml",
+    "url": "{cfg.url}/opds?page={page}",
+    "method": "GET",
+    "headers": {
+      "Authorization": "Basic {cfg.auth}",
+      "Accept": "application/atom+xml"
+    },
+    "item": "entry",
+    "fields": {
+      "title": "title",
+      "url": "link@href"
+    },
+    "page_size": 16,
+    "resolve_urls": true
+  },
+  "download": {
+    "username": "{cfg.user}",
+    "password": "{cfg.pass}",
+    "dest_dir": "/Kopi",
+    "filename": "{title}.epub"
+  },
+  "description": "Browse and download your Kopi briefings.",
+  "author": "ruqqq",
+  "version": "1.0.0"
+}
