@@ -191,7 +191,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     headers['Accept-Language'] = chipAcceptLanguage(
       authenticated && libby ? libby.identity : null, libby && libby.chipId);
     const r = await relayFollow('POST', LIBBY_BASE + '/chip' + query, headers, '');
-    if (r.error) throw new Error('relay: ' + r.error);
+    checkRelay(r, '/chip');
     if (r.status < 200 || r.status >= 300) {
       throw new Error('Libby refused a new session (HTTP ' + r.status + ')' +
         (r.status === 403 ? ' — ' + libbyResult(r) : ''));
@@ -210,14 +210,27 @@ CrossPoint.registerPlugin(async (container, api) => {
   // missing_chip, which is recoverable: mint a new chip with the old token and
   // replay once. Any other 403 is a refusal, not a stale token — retrying it
   // would just fail twice and hide the reason.
+  // The device buffers a relayed response whole and refuses anything over 32 KB.
+  // A big enough Libby account can cross that, and "response too large" says
+  // nothing about which call or what to do.
+  function checkRelay(r, what) {
+    if (!r.error) return r;
+    if (/too large/i.test(String(r.error))) {
+      throw new Error('your Libby account sends more data than this device can ' +
+        'hold in one request (' + what + '). Return or finish some loans, or use ' +
+        'the manual authorization-file route below.');
+    }
+    throw new Error('relay: ' + r.error);
+  }
+
   async function libbyRequest(method, url, body, extra) {
     let r = await relayFollow(method, url, libbyHeaders(extra), body || '');
-    if (r.error) throw new Error('relay: ' + r.error);
+    checkRelay(r, url.replace(LIBBY_BASE, '') || url);
     if (r.status === 403 && libbyResult(r) === 'missing_chip') {
       await rechip(true);
       await saveLibbyConfig();
       r = await relayFollow(method, url, libbyHeaders(extra), body || '');
-      if (r.error) throw new Error('relay: ' + r.error);
+      checkRelay(r, url.replace(LIBBY_BASE, '') || url);
     }
     return r;
   }
@@ -264,18 +277,24 @@ CrossPoint.registerPlugin(async (container, api) => {
     throw new Error('the setup code expired before it was entered');
   }
 
-  async function finishLink(blessing) {
+  // Returns the loans from the sync it already performed. Every /chip/sync is a
+  // slow round trip on this device, so the caller must not fetch it again just
+  // to read the same payload.
+  async function finishLink(blessing, onStep) {
+    if (onStep) onStep('Claiming the code…');
     await libbyJson('POST', '/chip/clone', JSON.stringify({ blessing: blessing }));
     // Cloning upgrades the chip, so the token must be re-minted to carry the
     // cards; the pre-clone identity cannot see loans.
+    if (onStep) onStep('Refreshing the session…');
     await rechip(true);
+    if (onStep) onStep('Reading your library…');
     const sync = await libbyJson('GET', '/chip/sync');
     libby.cards = (sync.cards || []).map((c) => ({
       name: c.advantageKey || c.library || '',
       library: (c.library && c.library.name) || c.libraryName || '',
     }));
     await saveLibbyConfig();
-    return sync;
+    return { sync: sync, loans: loansFromSync(sync) };
   }
 
   function sleep(ms) {
@@ -303,8 +322,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     return raw ? String(raw).slice(0, 10) : '';
   }
 
-  async function listLoans() {
-    const sync = await libbyJson('GET', '/chip/sync');
+  function loansFromSync(sync) {
     if (!sync.cards || !sync.cards.length) {
       throw new Error('no library card is linked — set up Libby again');
     }
@@ -319,6 +337,10 @@ CrossPoint.registerPlugin(async (container, api) => {
         format: loanFormat(loan),
       }))
       .filter((loan) => loan.format);
+  }
+
+  async function listLoans() {
+    return loansFromSync(await libbyJson('GET', '/chip/sync'));
   }
 
   // Two hops: the envelope names a signed, short-lived URL, and that URL serves
@@ -1251,11 +1273,12 @@ CrossPoint.registerPlugin(async (container, api) => {
       const blessing = await pollLink(code, (attempt) => {
         status('Enter the code in the Libby app. Waiting… (' + (60 - attempt * 2) + 's)');
       });
-      status('Code accepted, linking your cards…');
-      await finishLink(blessing);
+      // Three round trips follow, each slow on this device, so each one says
+      // what it is doing rather than leaving one message up for all of them.
+      const linked = await finishLink(blessing, (step) => status('Code accepted. ' + step));
       codeBox.style.display = 'none';
       renderLibbyState();
-      loans = await listLoans();
+      loans = linked.loans;
       renderLoans('No ebook loans right now');
       status('Linked. ' + loans.length + ' loan' + (loans.length === 1 ? '' : 's') + ' available.');
     } catch (e) {

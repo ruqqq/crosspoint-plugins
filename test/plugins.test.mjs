@@ -639,3 +639,57 @@ test('libby still refreshes when the stored token is unreadable', async () => {
   assert.ok(state.chipCalls.some((u) => !u.includes('&v=')));
   assert.match(document.elements['lby-loans'].innerHTML, /Adobe Book/);
 });
+
+test('libby syncs once while linking, not twice', async () => {
+  let syncs = 0;
+  const handler = libbyOk({
+    before: (method, url) => { if (url.endsWith('/chip/sync')) syncs += 1; return null; },
+  });
+  const { document } = await renderLibby({ libbyHandler: handler });
+
+  await document.elements['lby-link'].onclick();
+
+  // Every sync is a slow round trip on this device, and the loans are already
+  // in the payload the link step fetched.
+  assert.equal(syncs, 1, 'linking should not re-fetch the sync payload');
+  assert.match(document.elements['lby-loans'].innerHTML, /Adobe Book/);
+  assert.match(document.elements['lib-status'].textContent, /Linked\. 2 loans available/);
+});
+
+test('libby names each step while linking instead of going silent', async () => {
+  // The status shown at the moment of each request, captured without timers.
+  const ctx = {};
+  const statusAtCall = [];
+  const handler = libbyOk({
+    before: (method, url) => {
+      if (ctx.document) statusAtCall.push(ctx.document.elements['lib-status'].textContent);
+      return null;
+    },
+  });
+  const { document } = await renderLibby({ libbyHandler: handler });
+  ctx.document = document;
+
+  await document.elements['lby-link'].onclick();
+
+  const joined = statusAtCall.join(' | ');
+  // The bug was one message covering three round trips, so a long stall looked
+  // like a hang.
+  assert.match(joined, /Claiming the code/);
+  assert.match(joined, /Refreshing the session/);
+  assert.match(joined, /Reading your library/);
+});
+
+test('libby explains an oversized sync instead of leaking the relay error', async () => {
+  const handler = libbyOk({
+    before: (method, url) => {
+      // What the device returns when a response exceeds its 32 KB buffer.
+      if (url.endsWith('/chip/sync')) return { error: 'response too large, use /api/fetch' };
+      return null;
+    },
+  });
+  const { document } = await renderLibby({ libbyHandler: handler, storedLibby: LINKED });
+
+  const status = document.elements['lib-status'].textContent;
+  assert.match(status, /more data than this device can/);
+  assert.equal(/api\/fetch/.test(status), false, 'internal advice should not reach the user');
+});
