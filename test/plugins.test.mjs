@@ -123,9 +123,59 @@ async function renderKopi({ relay, existing } = {}) {
   return { document, writes };
 }
 
-test('kopi normalizes a pasted feed URL and stores basic credentials', async () => {
-  const { document, writes } = await renderKopi();
+const OK_FEED = async () => ({ status: 200, body: '<feed><entry/></feed>', headers: [] });
+
+test('kopi prefills a default server URL when nothing is configured', async () => {
+  const { document } = await renderKopi();
+  assert.equal(document.elements['kopi-url'].value, 'https://kopi.ruqqq.workers.dev');
   assert.match(document.elements['kopi-status'].textContent, /Not configured/);
+});
+
+test('kopi refuses to save without a username or password', async () => {
+  const { document, writes } = await renderKopi({ relay: OK_FEED });
+
+  await document.elements['kopi-save'].onclick();
+  assert.match(document.elements['kopi-status'].textContent, /Username and password are required/);
+
+  document.elements['kopi-user'].value = 'reader';
+  await document.elements['kopi-save'].onclick();
+  assert.match(document.elements['kopi-status'].textContent, /Password is required/);
+
+  // Nothing reached the SD card while the form was incomplete.
+  assert.equal(writes.length, 0);
+});
+
+test('kopi refuses to save credentials the server rejects', async () => {
+  const denied = async () => ({ status: 401, body: 'Unauthorized', headers: [] });
+  const { document, writes } = await renderKopi({ relay: denied });
+  document.elements['kopi-user'].value = 'reader';
+  document.elements['kopi-pass'].value = 'wrong';
+  await document.elements['kopi-save'].onclick();
+
+  assert.match(document.elements['kopi-status'].textContent, /incorrect/);
+  assert.match(document.elements['kopi-status'].textContent, /Nothing was saved/);
+  assert.equal(writes.length, 0);
+});
+
+test('kopi saves but warns when the server cannot be reached', async () => {
+  const down = async () => ({ status: 502, body: '', headers: [] });
+  const { document, writes } = await renderKopi({ relay: down });
+  document.elements['kopi-user'].value = 'reader';
+  document.elements['kopi-pass'].value = 'pw';
+  await document.elements['kopi-save'].onclick();
+
+  // An offline server must not block configuring the device.
+  assert.equal(writes.length, 1);
+  assert.match(document.elements['kopi-status'].textContent, /Saved, but could not verify/);
+});
+
+test('kopi flags a stored config that is missing credentials', async () => {
+  const { document } = await renderKopi({ existing: '{"url":"https://kopi.example.com"}' });
+  assert.match(document.elements['kopi-status'].textContent, /missing/);
+});
+
+test('kopi normalizes a pasted feed URL and stores basic credentials', async () => {
+  const { document, writes } = await renderKopi({ relay: OK_FEED });
 
   document.elements['kopi-url'].value = 'https://kopi.example.com/opds/';
   document.elements['kopi-user'].value = 'reader';
@@ -173,5 +223,5 @@ test('kopi reports feed entry count and authentication failures', async () => {
   denied.document.elements['kopi-user'].value = 'reader';
   denied.document.elements['kopi-pass'].value = 'wrong';
   await denied.document.elements['kopi-test'].onclick();
-  assert.match(denied.document.elements['kopi-status'].textContent, /Authentication failed/);
+  assert.match(denied.document.elements['kopi-status'].textContent, /Username or password is incorrect/);
 });

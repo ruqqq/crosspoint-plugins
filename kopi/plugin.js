@@ -5,6 +5,8 @@
 // Plugins > Kopi — no computer needed after setup.
 CrossPoint.registerPlugin(async (container, api) => {
   const CONFIG_PATH = '/.crosspoint/kopi.json';
+  // Prefilled when nothing is configured yet; editable for another instance.
+  const DEFAULT_URL = 'https://kopi.ruqqq.workers.dev';
 
   container.innerHTML =
     '<h2>Kopi</h2>' +
@@ -64,21 +66,74 @@ CrossPoint.registerPlugin(async (container, api) => {
 
   function currentConfig() {
     const url = normalizeUrl(urlEl.value);
-    const user = userEl.value;
+    const user = userEl.value.trim();
     const pass = passEl.value;
-    if (!url) throw new Error('server URL is required');
+    // Every one of these is required. Saving a half-filled config is the worst
+    // outcome: the reader reports only "Failed to fetch feed", which says
+    // nothing about which field was missing.
+    if (!url) throw new Error('Server URL is required.');
+    if (!user && !pass) throw new Error('Username and password are required.');
+    if (!user) throw new Error('Username is required.');
+    if (!pass) throw new Error('Password is required.');
     // {cfg.auth} is the base64 for the browse request's Authorization header;
     // {cfg.user}/{cfg.pass} feed the device's file download (Basic auth).
     return { url, user, pass, auth: btoa(user + ':' + pass) };
   }
 
+  // Verifies the config against the live feed. Returns {ok, rejected, message}:
+  // `rejected` distinguishes "the server said no" from "we could not ask",
+  // because only the former should block a save.
+  async function verify(cfg) {
+    // One plain GET of the feed. Kopi records a download row for every EPUB
+    // fetch, so never probe the acquisition links from here.
+    const r = await api.relay('GET', cfg.url + '/opds',
+      { Authorization: 'Basic ' + cfg.auth, Accept: 'application/atom+xml' }, '');
+    if (r.status === 401 || r.status === 403) {
+      return { ok: false, rejected: true,
+        message: 'Username or password is incorrect (HTTP ' + r.status + ').' };
+    }
+    if (r.status === 404) {
+      return { ok: false, rejected: true,
+        message: 'No OPDS feed at ' + cfg.url + '/opds (HTTP 404). Check the server URL.' };
+    }
+    if (r.status >= 200 && r.status < 300) {
+      const found = (r.body || '').match(/<entry\b/g);
+      const count = found ? found.length : 0;
+      // The relay truncates response bodies at 32 KB, so a large feed may
+      // report fewer entries than the server actually returned.
+      return { ok: true, rejected: false,
+        message: count
+          ? 'Credentials OK. Found ' + count + ' issue' + (count === 1 ? '' : 's') + '.'
+          : 'Credentials OK, but the feed is empty.' };
+    }
+    return { ok: false, rejected: false,
+      message: 'Could not reach the server (HTTP ' + (r.status || r.error) + ').' };
+  }
+
   document.getElementById('kopi-save').onclick = async () => {
+    let cfg;
     try {
-      const cfg = currentConfig();
+      cfg = currentConfig();
+    } catch (e) {
+      status(e.message);
+      return;
+    }
+    status('Checking credentials…');
+    try {
+      const result = await verify(cfg);
+      // Wrong credentials are never worth saving — the reader would fail with a
+      // message that points nowhere. An unreachable server is different: it may
+      // just be offline, so save and say so.
+      if (result.rejected) {
+        status(result.message + ' Nothing was saved.');
+        return;
+      }
       await writeConfig(cfg);
       urlEl.value = cfg.url;
       clearBtn.style.display = '';
-      status('Saved. Browse from the device: Settings > System > Plugins > Kopi.');
+      status(result.ok
+        ? 'Saved. ' + result.message + ' Browse from the device: Settings > System > Plugins > Kopi.'
+        : 'Saved, but could not verify: ' + result.message);
     } catch (e) {
       status('Error: ' + e.message);
     }
@@ -89,29 +144,12 @@ CrossPoint.registerPlugin(async (container, api) => {
     try {
       cfg = currentConfig();
     } catch (e) {
-      status('Error: ' + e.message);
+      status(e.message);
       return;
     }
     status('Testing…');
     try {
-      // One plain GET of the feed. Kopi records a download row for every EPUB
-      // fetch, so never probe the acquisition links from here.
-      const r = await api.relay('GET', cfg.url + '/opds',
-        { Authorization: 'Basic ' + cfg.auth, Accept: 'application/atom+xml' }, '');
-      if (r.status === 401 || r.status === 403) {
-        status('Authentication failed (HTTP ' + r.status + '). Check the username and password.');
-      } else if (r.status >= 200 && r.status < 300) {
-        const body = r.body || '';
-        const found = body.match(/<entry\b/g);
-        const count = found ? found.length : 0;
-        // The relay truncates response bodies at 32 KB, so a large feed may
-        // report fewer entries than the server actually returned.
-        status(count
-          ? 'Connection OK. Found ' + count + ' issue' + (count === 1 ? '' : 's') + '.'
-          : 'Connection OK, but the feed is empty.');
-      } else {
-        status('Server returned HTTP ' + (r.status || r.error) + '.');
-      }
+      status((await verify(cfg)).message);
     } catch (e) {
       status('Error: ' + e.message);
     }
@@ -134,8 +172,15 @@ CrossPoint.registerPlugin(async (container, api) => {
     userEl.value = existing.user || '';
     passEl.value = existing.pass || '';
     clearBtn.style.display = '';
-    status('Configured. Browse from the device, or update below.');
+    // A config saved without credentials (hand-edited, or written by an older
+    // version) fails on the reader with an error that names no cause. Say so here.
+    if (!existing.user || !existing.pass) {
+      status('Username and password are missing — the reader cannot sign in. Fill them in and save.');
+    } else {
+      status('Configured. Browse from the device, or update below.');
+    }
   } else {
-    status('Not configured yet.');
+    urlEl.value = DEFAULT_URL;
+    status('Not configured yet. Enter your OPDS username and password.');
   }
 });

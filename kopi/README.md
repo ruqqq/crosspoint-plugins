@@ -8,10 +8,19 @@ lists that feed on the device and downloads issues to the SD card.
 
 1. In Kopi, create an OPDS credential and note the username and password.
 2. Open the device web page → **Settings** → the Kopi card.
-3. Enter the **Server URL** of your Kopi instance, for example
-   `https://kopi.example.com`. Pasting the full feed URL (`.../opds`) works
-   too — the plugin trims it.
-4. Enter the OPDS username and password, tap **Test**, then **Save**.
+3. The **Server URL** is prefilled. Change it if you run your own instance —
+   pasting the full feed URL (`.../opds`) works too, the plugin trims it.
+4. Enter the OPDS username and password and tap **Save**.
+
+Save verifies the credentials against the feed before writing anything. If the
+server rejects them, nothing is saved and the card says which field is wrong —
+rather than leaving the reader to fail later with "Failed to fetch feed", which
+names no cause. If the server can't be reached at all, the config is still
+saved with a warning, since an offline server shouldn't block setup. **Test**
+runs the same check without saving.
+
+The username is case-sensitive on older Kopi deployments, so enter it exactly
+as issued.
 
 ## Use
 
