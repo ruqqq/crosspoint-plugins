@@ -225,3 +225,343 @@ test('kopi reports feed entry count and authentication failures', async () => {
   await denied.document.elements['kopi-test'].onclick();
   assert.match(denied.document.elements['kopi-status'].textContent, /Username or password is incorrect/);
 });
+// Appended to crosspoint-plugins/test/plugins.test.mjs
+
+const LIBBY_IDS = [
+  'lib-account-state', 'lib-user', 'lib-pass', 'lib-go', 'lib-acsm',
+  'lib-refresh', 'lib-fulfill', 'lib-status',
+  'lby-state', 'lby-code', 'lby-code-value', 'lby-link', 'lby-unlink',
+  'lby-loans', 'lby-refresh', 'lby-get',
+];
+
+// A loan set covering every branch of loanFormat: one Adobe ebook, one
+// DRM-free ebook, one that only exists in Libby's web reader, and one
+// audiobook. Only the first two are sendable.
+const SYNC_PAYLOAD = {
+  result: 'synchronized',
+  cards: [{ advantageKey: 'sgpl', library: { name: 'Singapore Libraries' } }],
+  loans: [
+    {
+      id: '111', cardId: '900', title: 'Adobe Book', firstCreatorName: 'A. Writer',
+      expireDate: '2026-09-07T12:00:00Z', type: { id: 'ebook' },
+      formats: [{ id: 'ebook-overdrive' }, { id: 'ebook-epub-adobe' }],
+    },
+    {
+      id: '222', cardId: '900', title: 'Open Book', firstCreatorName: 'O. Author',
+      expireDate: '2026-09-08T12:00:00Z', type: { id: 'ebook' },
+      formats: [{ id: 'ebook-epub-open' }, { id: 'ebook-epub-adobe' }],
+    },
+    {
+      id: '333', cardId: '900', title: 'Web Only', type: { id: 'ebook' },
+      formats: [{ id: 'ebook-overdrive' }],
+    },
+    {
+      id: '444', cardId: '900', title: 'An Audiobook', type: { id: 'audiobook' },
+      formats: [{ id: 'audiobook-overdrive' }],
+    },
+  ],
+};
+
+const ACSM_XML =
+  '<adept:fulfillmentToken xmlns:adept="http://ns.adobe.com/adept">' +
+  '<adept:operatorURL>https://fulfill.example.overdrive.com/acs/</adept:operatorURL>' +
+  '<adept:hmac>aG1hYw==</adept:hmac></adept:fulfillmentToken>';
+
+function adeptRelay(url, state) {
+  if (url.endsWith('/ActivationServiceInfo')) {
+    return '<adept:service xmlns:adept="http://ns.adobe.com/adept">' +
+      '<adept:authURL>https://adeactivate.adobe.com/adept</adept:authURL>' +
+      '<adept:userInfoURL>https://adeactivate.adobe.com/user</adept:userInfoURL>' +
+      '<adept:certificate>Y2VydA==</adept:certificate></adept:service>';
+  }
+  if (url.endsWith('/AuthenticationServiceInfo')) {
+    return '<adept:service xmlns:adept="http://ns.adobe.com/adept">' +
+      '<adept:certificate>YXV0aC1jZXJ0</adept:certificate></adept:service>';
+  }
+  if (url.endsWith('/SignInDirect')) {
+    return '<adept:credentials xmlns:adept="http://ns.adobe.com/adept">' +
+      '<adept:user>urn:uuid:user</adept:user><adept:pkcs12>cDEy</adept:pkcs12>' +
+      '<adept:licenseCertificate>bGljLWNlcnQ=</adept:licenseCertificate>' +
+      '<adept:encryptedPrivateLicenseKey>ZW5j</adept:encryptedPrivateLicenseKey>' +
+      '</adept:credentials>';
+  }
+  if (url.endsWith('/Activate')) {
+    return '<adept:activationToken xmlns:adept="http://ns.adobe.com/adept">' +
+      '<adept:device>urn:uuid:device</adept:device></adept:activationToken>';
+  }
+  if (url.includes('/LicenseServiceInfo?')) {
+    return '<adept:licenseServiceInfo xmlns:adept="http://ns.adobe.com/adept">' +
+      '<adept:certificate>bGljZW5zZS1jZXJ0</adept:certificate></adept:licenseServiceInfo>';
+  }
+  if (url.endsWith('/Fulfill')) {
+    return '<adept:fulfillmentResult xmlns:adept="http://ns.adobe.com/adept" ' +
+      'xmlns:dc="http://purl.org/dc/elements/1.1/"><adept:resourceItemInfo>' +
+      '<adept:src>https://download.example.overdrive.com/book.epub</adept:src>' +
+      '<adept:licenseToken><adept:licenseURL>' +
+      'https://license.example.overdrive.com/service</adept:licenseURL>' +
+      '<adept:encryptedKey>a2V5</adept:encryptedKey></adept:licenseToken>' +
+      '</adept:resourceItemInfo><dc:title>Adobe Book</dc:title></adept:fulfillmentResult>';
+  }
+  if (url.endsWith('/Auth') || url.endsWith('/InitLicenseService')) {
+    return '<adept:ok xmlns:adept="http://ns.adobe.com/adept"/>';
+  }
+  return null;
+}
+
+const CRYPTO = async (op, fields = {}) => {
+  const zeros = (length) => btoa(String.fromCharCode(...new Uint8Array(length)));
+  if (op === 'random') return { data: zeros(fields.len) };
+  if (op === 'sha1') return { data: zeros(20) };
+  if (op === 'keygen') return { public: 'cHVibGlj', private: 'cHJpdmF0ZQ==' };
+  if (op === 'pubencrypt') return { data: zeros(128) };
+  if (op === 'aesenc') return { data: zeros(16) };
+  if (op === 'aesdec') return { data: 'cHJpdmF0ZQ==' };
+  if (op === 'pkcs12') return { key: 'c2lnbmluZy1rZXk=', cert: 'c2lnbmluZy1jZXJ0' };
+  if (op === 'sign') return { data: zeros(128) };
+  throw new Error('unexpected crypto op: ' + op);
+};
+
+// One harness for every Libby test. `libbyHandler` decides what the Libby host
+// answers so each test can shape only the calls it cares about.
+async function renderLibby({ libbyHandler, storedLibby, storedCredential } = {}) {
+  const document = fakeDocument(LIBBY_IDS);
+  const state = {
+    writes: [], downloads: [], deletes: [], relayCalls: [],
+    fulfillmentOperations: [], mkdirs: [],
+    savedCredential: storedCredential || '',
+    storedLibby: storedLibby || null,
+  };
+
+  const relay = async (method, url, headers = {}, body = '') => {
+    state.relayCalls.push({ method, url, headers, body });
+    // The firmware sets its own User-Agent; sending one appends a duplicate.
+    assert.equal(
+      Object.keys(headers).some((n) => n.toLowerCase() === 'user-agent'), false,
+      'must not send a User-Agent: ' + url);
+    // The CDN the open-format link redirects to; the final hop just resolves.
+    if (url.startsWith('https://cdn.example/')) return { status: 200, body: '', headers: [] };
+    if (url.startsWith('https://sentry.libbyapp.com') ||
+        url.startsWith('https://fulfill.libby')) {
+      if (!libbyHandler) throw new Error('unexpected libby call: ' + url);
+      return libbyHandler(method, url, headers, body, state);
+    }
+    const xml = adeptRelay(url, state);
+    if (xml === null) throw new Error('unexpected relay: ' + method + ' ' + url);
+    return { status: 200, body: xml, headers: [] };
+  };
+
+  const api = {
+    crypto: CRYPTO,
+    relay,
+    async writeFile(path, data) {
+      state.writes.push({ path, data });
+      const text = Buffer.from(data, 'base64').toString('utf8');
+      if (path === '/.crosspoint/content.key') state.savedCredential = text;
+      if (path === '/.crosspoint/libby.json') {
+        state.storedLibby = text === '{}' ? null : JSON.parse(text);
+      }
+      if (path.endsWith('.rights')) state.fulfillmentOperations.push('rights');
+      return { ok: true, bytes: data.length };
+    },
+    async fetchToSd(url, dest, headers) {
+      state.downloads.push({ url, dest, headers });
+      state.fulfillmentOperations.push('download');
+      return { status: 200, bytes: 4321 };
+    },
+  };
+
+  async function fetch(url, options = {}) {
+    if (url === '/mkdir') {
+      state.mkdirs.push(new URLSearchParams(options.body).get('path'));
+      return response();
+    }
+    if (url === '/delete') {
+      state.deletes.push(new URLSearchParams(options.body).get('path'));
+      return response();
+    }
+    if (url.startsWith('/api/files')) {
+      const path = new URLSearchParams(url.split('?')[1]).get('path');
+      if (path === '/.crosspoint') {
+        return response({ json: state.savedCredential
+          ? [{ name: 'content.key', isDirectory: false }] : [] });
+      }
+      return response({ json: [] });
+    }
+    if (url.startsWith('/download')) {
+      const path = new URLSearchParams(url.split('?')[1]).get('path');
+      if (path === '/.crosspoint/content.key') {
+        return state.savedCredential
+          ? response({ text: state.savedCredential }) : response({ status: 404 });
+      }
+      if (path === '/.crosspoint/libby.json') {
+        return state.storedLibby
+          ? response({ text: JSON.stringify(state.storedLibby) })
+          : response({ status: 404 });
+      }
+      return response({ status: 404 });
+    }
+    throw new Error('unexpected fetch: ' + url);
+  }
+
+  const { render } = await loadPlugin('libby/plugin.js', {
+    document,
+    window: { location: { search: '?path=%2FBooks' } },
+    fetch,
+  });
+  await render({ innerHTML: '' }, api);
+  return { document, state, api };
+}
+
+// Activates the Adobe account so the download tests have a session, and returns
+// the resulting credential text for reuse.
+async function activatedCredential() {
+  const { document, state } = await renderLibby({ libbyHandler: () => {
+    throw new Error('no libby calls expected during activation');
+  } });
+  document.elements['lib-user'].value = 'reader@example.com';
+  document.elements['lib-pass'].value = 'secret';
+  await document.elements['lib-go'].onclick();
+  assert.match(state.savedCredential, /^FREEINK-CONTENT-KEY 1/m);
+  return state.savedCredential;
+}
+
+const LINKED = { identity: 'tok-linked', chipId: 'chip-1', cards: [{ name: 'sgpl', library: 'Singapore Libraries' }] };
+
+function libbyOk(overrides = {}) {
+  return (method, url, headers, body, state) => {
+    const json = (obj) => ({ status: 200, body: JSON.stringify(obj), headers: [] });
+    if (overrides.before) {
+      const r = overrides.before(method, url, headers, body, state);
+      if (r) return r;
+    }
+    if (url.includes('/chip?client=dewey')) return json({ chip: 'chip-1', identity: 'tok-' + state.relayCalls.length });
+    if (url.includes('/chip/clone/code')) {
+      const code = new URLSearchParams(url.split('?')[1]).get('code');
+      if (!code) return json({ result: 'regenerated', code: '45723223', expiry: 1 });
+      return json({ result: 'fulfilled', blessing: 'bless-me' });
+    }
+    if (url.endsWith('/chip/clone')) return json({ result: 'cloned' });
+    if (url.endsWith('/chip/sync')) return json(SYNC_PAYLOAD);
+    if (url.includes('/fulfill/ebook-epub-adobe')) {
+      return json({ fulfill: { href: 'https://fulfill.libby.example/acsm/111' } });
+    }
+    if (url.includes('/fulfill/ebook-epub-open')) {
+      return json({ fulfill: { href: 'https://fulfill.libby.example/open/222' } });
+    }
+    if (url.startsWith('https://fulfill.libby.example/acsm/')) {
+      return { status: 200, body: ACSM_XML, headers: [] };
+    }
+    if (url.startsWith('https://fulfill.libby.example/open/')) {
+      // HEAD probe from resolveRedirects, then the CDN hop.
+      return { status: 302, body: '', headers: [['location', 'https://cdn.example/open.epub']] };
+    }
+    throw new Error('unexpected libby call: ' + method + ' ' + url);
+  };
+}
+
+test('libby links with a setup code and stores the token outside content.key', async () => {
+  const { document, state } = await renderLibby({ libbyHandler: libbyOk() });
+  assert.match(document.elements['lby-state'].textContent, /Not linked/);
+
+  await document.elements['lby-link'].onclick();
+
+  // The code is shown to the user in groups of four to be read off a screen.
+  assert.equal(document.elements['lby-code-value'].textContent, '4572-3223');
+  assert.match(document.elements['lby-state'].textContent, /Singapore Libraries/);
+
+  const tokenWrites = state.writes.filter((w) => w.path === '/.crosspoint/libby.json');
+  assert.ok(tokenWrites.length, 'the identity token must be persisted');
+  assert.ok(state.storedLibby.identity, 'stored config carries an identity');
+  // The Adobe credential is a contract with the on-device SDK; Libby's token
+  // has no business in it.
+  assert.equal(state.writes.some((w) => w.path === '/.crosspoint/content.key'), false);
+});
+
+test('libby lists only loans this device can actually open', async () => {
+  const { document } = await renderLibby({ libbyHandler: libbyOk(), storedLibby: LINKED });
+  const labels = document.elements['lby-loans'].innerHTML;
+
+  assert.match(labels, /Adobe Book/);
+  assert.match(labels, /Open Book/);
+  // Web-reader-only titles and audiobooks cannot become a file.
+  assert.equal(/Web Only/.test(labels), false);
+  assert.equal(/An Audiobook/.test(labels), false);
+  // Due dates come from expireDate, trimmed to the day.
+  assert.match(labels, /due 2026-09-07/);
+});
+
+test('libby sends a protected loan through fulfillment, rights first', async () => {
+  const credential = await activatedCredential();
+  const { document, state } = await renderLibby({
+    libbyHandler: libbyOk(), storedLibby: LINKED, storedCredential: credential,
+  });
+
+  document.elements['lby-loans'].value = '0'; // Adobe Book
+  document.elements['lby-loans'].onchange();
+  assert.equal(document.elements['lby-get'].disabled, false);
+  await document.elements['lby-get'].onclick();
+
+  assert.deepEqual(state.mkdirs, ['/Libby']);
+  assert.deepEqual(state.fulfillmentOperations, ['rights', 'download']);
+  assert.equal(state.downloads.length, 1);
+  assert.equal(state.downloads[0].dest, '/Libby/Adobe Book.epub');
+  assert.ok(state.writes.some((w) => w.path === '/Libby/Adobe Book.epub.rights'));
+  assert.match(document.elements['lib-status'].textContent, /Sent “Adobe Book”/);
+});
+
+test('libby downloads a DRM-free loan directly, with no rights sidecar', async () => {
+  const credential = await activatedCredential();
+  const { document, state } = await renderLibby({
+    libbyHandler: libbyOk(), storedLibby: LINKED, storedCredential: credential,
+  });
+
+  document.elements['lby-loans'].value = '1'; // Open Book, offered open + adobe
+  document.elements['lby-loans'].onchange();
+  await document.elements['lby-get'].onclick();
+
+  // Open beats Adobe, so no fulfillment happened at all.
+  assert.deepEqual(state.fulfillmentOperations, ['download']);
+  assert.equal(state.downloads[0].dest, '/Libby/Open Book.epub');
+  // The signed link redirects to a CDN and fetchToSd cannot follow redirects.
+  assert.equal(state.downloads[0].url, 'https://cdn.example/open.epub');
+  assert.equal(state.writes.some((w) => w.path.endsWith('.rights')), false);
+});
+
+test('libby recovers from an expired chip and keeps the refreshed token', async () => {
+  let rejected = false;
+  const handler = libbyOk({
+    before: (method, url) => {
+      // The first sync fails the way an expired identity fails.
+      if (url.endsWith('/chip/sync') && !rejected) {
+        rejected = true;
+        return { status: 403, body: '{"result":"missing_chip"}', headers: [] };
+      }
+      return null;
+    },
+  });
+  const { document, state } = await renderLibby({ libbyHandler: handler, storedLibby: LINKED });
+
+  assert.equal(rejected, true, 'the 403 branch must have been exercised');
+  assert.match(document.elements['lby-loans'].innerHTML, /Adobe Book/);
+  // A refreshed identity is worthless unless it is written back.
+  assert.notEqual(state.storedLibby.identity, LINKED.identity);
+});
+
+test('libby keeps send disabled until both the account and the link exist', async () => {
+  // Linked, but the Adobe account was never activated.
+  const noAccount = await renderLibby({ libbyHandler: libbyOk(), storedLibby: LINKED });
+  noAccount.document.elements['lby-loans'].value = '0';
+  noAccount.document.elements['lby-loans'].onchange();
+  await noAccount.document.elements['lby-get'].onclick();
+  assert.match(noAccount.document.elements['lib-status'].textContent, /Activate the device first/);
+  assert.equal(noAccount.state.downloads.length, 0);
+
+  // Activated, but Libby was never linked.
+  const credential = await activatedCredential();
+  const noLink = await renderLibby({
+    libbyHandler: () => { throw new Error('no libby calls expected'); },
+    storedCredential: credential,
+  });
+  assert.equal(noLink.document.elements['lby-get'].disabled, true);
+  assert.match(noLink.document.elements['lby-loans'].innerHTML, /Link Libby/);
+});

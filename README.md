@@ -29,6 +29,11 @@ official catalog.
 
 ## Plugins
 
+- **[libby](libby/)** — borrow a book in Libby and put it on the reader without
+  a computer. Lists your current loans, fetches the authorization file, and
+  unlocks the book for this device into `/Libby/`. Derived from the upstream
+  Protected Content plugin, whose activation and fulfillment code it reuses;
+  books stay protected on the card and stop opening when the loan ends.
 - **[kopi](kopi/)** — read your Kopi briefings on the reader. Kopi serves each
   issue as an EPUB over an OPDS feed; the plugin lists the feed on the device
   and downloads issues to `/Kopi/` on the SD card. Set the server URL and OPDS

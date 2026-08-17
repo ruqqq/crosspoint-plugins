@@ -14,6 +14,19 @@
         "plugin.js",
         "README.md"
       ]
+    },
+    {
+      "name": "libby",
+      "title": "Libby",
+      "description": "Borrow from Libby and read on the device.",
+      "author": "ruqqq",
+      "version": "1.0.0",
+      "base": "https://raw.githubusercontent.com/ruqqq/crosspoint-plugins/main/libby/",
+      "files": [
+        "manifest.json",
+        "plugin.js",
+        "README.md"
+      ]
     }
   ]
 }
