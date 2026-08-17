@@ -326,7 +326,7 @@ const CRYPTO = async (op, fields = {}) => {
 async function renderLibby({ libbyHandler, storedLibby, storedCredential } = {}) {
   const document = fakeDocument(LIBBY_IDS);
   const state = {
-    writes: [], downloads: [], deletes: [], relayCalls: [],
+    writes: [], downloads: [], deletes: [], relayCalls: [], chipCalls: [],
     fulfillmentOperations: [], mkdirs: [],
     savedCredential: storedCredential || '',
     storedLibby: storedLibby || null,
@@ -425,7 +425,10 @@ async function activatedCredential() {
   return state.savedCredential;
 }
 
-const LINKED = { identity: 'tok-linked', chipId: 'chip-1', cards: [{ name: 'sgpl', library: 'Singapore Libraries' }] };
+// A realistic identity: the plugin reads chip.id out of the JWT to name the
+// chip it is replacing.
+const LINKED_IDENTITY = 'eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJyZWFkaXZlcnNlIiwiaXNzIjoic2VudHJ5IiwiY2hpcCI6eyJpZCI6ImFiY2QxMjM0LWIzN2EtNDZiOS04NDZlLWIxMDAwMjFhNzYyMSJ9LCJleHAiOjk5OTk5OTk5OTl9.sig';
+const LINKED = { identity: LINKED_IDENTITY, chipId: 'abcd1234-b37a-46b9-846e-b100021a7621', cards: [{ name: 'sgpl', library: 'Singapore Libraries' }] };
 
 function libbyOk(overrides = {}) {
   return (method, url, headers, body, state) => {
@@ -434,7 +437,12 @@ function libbyOk(overrides = {}) {
       const r = overrides.before(method, url, headers, body, state);
       if (r) return r;
     }
-    if (url.includes('/chip?client=dewey')) return json({ chip: 'chip-1', identity: 'tok-' + state.relayCalls.length });
+    if (url.includes('/chip?')) {
+      // Libby rejects a chip that does not declare its client version.
+      assert.match(url, /[?&]c=d%3A22\.0\.3/, 'chip request must declare a client version');
+      state.chipCalls.push(url);
+      return json({ chip: 'chip-1', identity: 'tok-' + state.relayCalls.length });
+    }
     if (url.includes('/chip/clone/code')) {
       const code = new URLSearchParams(url.split('?')[1]).get('code');
       if (!code) return json({ result: 'regenerated', code: '45723223', expiry: 1 });
@@ -564,4 +572,70 @@ test('libby keeps send disabled until both the account and the link exist', asyn
   });
   assert.equal(noLink.document.elements['lby-get'].disabled, true);
   assert.match(noLink.document.elements['lby-loans'].innerHTML, /Link Libby/);
+});
+
+test('libby names the chip it replaces when refreshing a known identity', async () => {
+  let rejected = false;
+  const handler = libbyOk({
+    before: (method, url) => {
+      if (url.endsWith('/chip/sync') && !rejected) {
+        rejected = true;
+        return { status: 403, body: '{"result":"missing_chip"}', headers: [] };
+      }
+      return null;
+    },
+  });
+  const { state } = await renderLibby({ libbyHandler: handler, storedLibby: LINKED });
+
+  // The replacement request must carry both the client version and the id of
+  // the chip being replaced, taken from the stored JWT.
+  const refresh = state.chipCalls.find((u) => u.includes('&v='));
+  assert.ok(refresh, 'the re-chip should name the chip it replaces');
+  assert.match(refresh, /[?&]v=abcd1234(&|$)/);
+  assert.match(refresh, /[?&]s=0/);
+});
+
+test('libby explains a version refusal instead of retrying it', async () => {
+  let syncCalls = 0;
+  const handler = libbyOk({
+    before: (method, url) => {
+      if (url.endsWith('/chip/sync')) {
+        syncCalls += 1;
+        return { status: 403, body: '{"result":"client_upgrade_required"}', headers: [] };
+      }
+      return null;
+    },
+  });
+  const { document } = await renderLibby({ libbyHandler: handler, storedLibby: LINKED });
+
+  // Only missing_chip is a stale token. Replaying a version refusal would fail
+  // twice and bury the reason.
+  assert.equal(syncCalls, 1, 'a version refusal must not be retried');
+  const status = document.elements['lib-status'].textContent;
+  assert.match(status, /needs an update/);
+  assert.match(status, /manual authorization-file/);
+  assert.equal(/client_upgrade_required/.test(status), false,
+    'the raw code should not be shown to the user');
+});
+
+test('libby still refreshes when the stored token is unreadable', async () => {
+  let rejected = false;
+  const handler = libbyOk({
+    before: (method, url) => {
+      if (url.endsWith('/chip/sync') && !rejected) {
+        rejected = true;
+        return { status: 403, body: '{"result":"missing_chip"}', headers: [] };
+      }
+      return null;
+    },
+  });
+  // A truncated or pre-upgrade token has no readable chip id.
+  const { document, state } = await renderLibby({
+    libbyHandler: handler, storedLibby: { identity: 'not-a-jwt', chipId: '' },
+  });
+
+  assert.equal(rejected, true);
+  // The replacement goes out unversioned rather than throwing.
+  assert.ok(state.chipCalls.some((u) => !u.includes('&v=')));
+  assert.match(document.elements['lby-loans'].innerHTML, /Adobe Book/);
 });

@@ -27,6 +27,9 @@ CrossPoint.registerPlugin(async (container, api) => {
   // Libby. sentry.libbyapp.com is current; sentry-read.svc.overdrive.com is the
   // legacy host and now fails for many users.
   const LIBBY_BASE = 'https://sentry.libbyapp.com';
+  // Libby refuses card-bearing chips from a client that does not say which
+  // version it is ("client_upgrade_required"). "d" is Dewey, its own web client.
+  const LIBBY_CLIENT_VERSION = 'd:22.0.3';
   const LIBBY_CONFIG_PATH = '/.crosspoint/libby.json';
   const LIBBY_DEST = '/Libby';
   // Formats a reader can actually hold, best first. Open formats are plain
@@ -144,6 +147,32 @@ CrossPoint.registerPlugin(async (container, api) => {
     }
   }
 
+  // The identity is a JWT; its payload names the chip this token belongs to.
+  function jwtPayload(identity) {
+    const part = String(identity || '').split('.')[1];
+    if (!part) throw new Error('Libby identity is not a token');
+    const padded = part.replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(b64ToUtf8(padded + '==='.slice((padded.length + 3) % 4)));
+  }
+
+  // Re-chipping has to name the chip being replaced, by its first id segment.
+  function shortChipId(identity) {
+    const payload = jwtPayload(identity);
+    const id = payload.chip && payload.chip.id;
+    if (!id) throw new Error('Libby identity carries no chip id');
+    return String(id).split('-')[0];
+  }
+
+  // Libby's web client derives this two-letter value from the token itself and
+  // the server checks it. Undocumented, and the usual cause of a chip being
+  // rejected out of hand, so it is reproduced exactly.
+  function chipAcceptLanguage(identity, chipId) {
+    let seed = identity;
+    if (!seed) seed = chipId ? 'xxxxxx' + chipId : 'cudlkahllcnsjxhbmddl';
+    const letters = String(seed).split('').filter((c) => c >= 'a' && c <= 'z');
+    return letters.reverse().join('').slice(4, 6);
+  }
+
   // Exchanges the current identity for a fresh one. Used both to create the
   // anonymous chip and to recover from an expired token.
   async function rechip(authenticated) {
@@ -151,10 +180,21 @@ CrossPoint.registerPlugin(async (container, api) => {
     // The first chip of a pairing must be anonymous; a stale bearer would carry
     // the old, unusable chip forward.
     if (!authenticated) delete headers.Authorization;
-    const r = await relayFollow('POST', LIBBY_BASE + '/chip?client=dewey', headers, '');
+    let query = '?c=' + encodeURIComponent(LIBBY_CLIENT_VERSION) + '&s=0';
+    if (authenticated && libby && libby.identity) {
+      // Naming the chip being replaced is preferred but not required; a token
+      // we cannot read is exactly when we most need the request to still go out.
+      try {
+        query += '&v=' + encodeURIComponent(shortChipId(libby.identity));
+      } catch (e) { /* fall back to an unversioned replacement */ }
+    }
+    headers['Accept-Language'] = chipAcceptLanguage(
+      authenticated && libby ? libby.identity : null, libby && libby.chipId);
+    const r = await relayFollow('POST', LIBBY_BASE + '/chip' + query, headers, '');
     if (r.error) throw new Error('relay: ' + r.error);
     if (r.status < 200 || r.status >= 300) {
-      throw new Error('Libby refused a new session (HTTP ' + r.status + ')');
+      throw new Error('Libby refused a new session (HTTP ' + r.status + ')' +
+        (r.status === 403 ? ' — ' + libbyResult(r) : ''));
     }
     const j = parseJson(r.body, '/chip');
     if (!j.identity) throw new Error('Libby did not return an identity token');
@@ -162,13 +202,18 @@ CrossPoint.registerPlugin(async (container, api) => {
     return j;
   }
 
-  // The identity JWT lasts about a week, and every maintained Libby client
-  // recovers the same way: on a 403 the chip is stale, so mint a new one with
-  // the old token and replay the request exactly once.
+  function libbyResult(r) {
+    try { return JSON.parse(r.body).result || ''; } catch (e) { return ''; }
+  }
+
+  // The identity JWT lasts about a week. An expired one comes back as 403
+  // missing_chip, which is recoverable: mint a new chip with the old token and
+  // replay once. Any other 403 is a refusal, not a stale token — retrying it
+  // would just fail twice and hide the reason.
   async function libbyRequest(method, url, body, extra) {
     let r = await relayFollow(method, url, libbyHeaders(extra), body || '');
     if (r.error) throw new Error('relay: ' + r.error);
-    if (r.status === 403) {
+    if (r.status === 403 && libbyResult(r) === 'missing_chip') {
       await rechip(true);
       await saveLibbyConfig();
       r = await relayFollow(method, url, libbyHeaders(extra), body || '');
@@ -182,9 +227,15 @@ CrossPoint.registerPlugin(async (container, api) => {
     const extra = body ? { 'Content-Type': 'application/json' } : {};
     const r = await libbyRequest(method, url, body, extra);
     if (r.status < 200 || r.status >= 300) {
-      let detail = '';
-      try { detail = ' — ' + (parseJson(r.body, url).result || ''); } catch (e) {}
-      throw new Error('Libby returned HTTP ' + r.status + detail);
+      const result = libbyResult(r);
+      // Nothing the reader can do about this one, so say what it means rather
+      // than echoing a code that sounds like a user error.
+      if (result === 'client_upgrade_required') {
+        throw new Error('Libby has stopped accepting this plugin\'s version. ' +
+          'It needs an update — until then, use the manual authorization-file ' +
+          'route at the bottom of this card.');
+      }
+      throw new Error('Libby returned HTTP ' + r.status + (result ? ' — ' + result : ''));
     }
     return parseJson(r.body, url);
   }
