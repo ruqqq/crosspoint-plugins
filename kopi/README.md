@@ -1,8 +1,8 @@
 # Kopi
 
-Read your Kopi briefings on the reader. Kopi
-publishes each issue as an EPUB and serves them over an OPDS feed; this plugin
-lists that feed on the device and downloads issues to the SD card.
+Read your Kopi briefings on the reader. Kopi publishes each issue as an EPUB
+and serves them over an OPDS feed; this plugin lists your issues on the device,
+newest first, and downloads them to the SD card.
 
 ## Set up (once, from a browser)
 
@@ -12,12 +12,12 @@ lists that feed on the device and downloads issues to the SD card.
    pasting the full feed URL (`.../opds`) works too, the plugin trims it.
 4. Enter the OPDS username and password and tap **Save**.
 
-Save verifies the credentials against the feed before writing anything. If the
-server rejects them, nothing is saved and the card says which field is wrong —
-rather than leaving the reader to fail later with "Failed to fetch feed", which
-names no cause. If the server can't be reached at all, the config is still
-saved with a warning, since an offline server shouldn't block setup. **Test**
-runs the same check without saving.
+Save verifies the credentials against the same catalog the reader browses,
+before writing anything. If the server rejects them, nothing is saved and the
+card says which field is wrong — rather than leaving the reader to fail later
+with "Failed to fetch feed", which names no cause. If the server can't be
+reached at all, the config is still saved with a warning, since an offline
+server shouldn't block setup. **Test** runs the same check without saving.
 
 The username is case-sensitive on older Kopi deployments, so enter it exactly
 as issued.

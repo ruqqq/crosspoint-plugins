@@ -4,22 +4,23 @@
     "file": "/.crosspoint/kopi.json"
   },
   "browse": {
-    "format": "xml",
-    "url": "{cfg.url}/opds?page={page}",
+    "format": "json",
+    "url": "{cfg.url}/opds/list?page={page}&limit={limit}",
     "method": "GET",
     "headers": {
       "Authorization": "Basic {cfg.auth}",
-      "Accept": "application/atom+xml"
+      "Accept": "application/json"
     },
-    "item": "entry",
+    "items": "items",
     "fields": {
       "title": "title",
-      "url": "link@href"
+      "url": "url",
+      "id": "id"
     },
-    "page_size": 16,
-    "resolve_urls": true
+    "page_size": 16
   },
   "download": {
+    "url": "{url}",
     "username": "{cfg.user}",
     "password": "{cfg.pass}",
     "dest_dir": "/Kopi",
@@ -27,5 +28,5 @@
   },
   "description": "Browse and download your Kopi briefings.",
   "author": "ruqqq",
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

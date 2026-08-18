@@ -7,6 +7,12 @@ CrossPoint.registerPlugin(async (container, api) => {
   const CONFIG_PATH = '/.crosspoint/kopi.json';
   // Prefilled when nothing is configured yet; editable for another instance.
   const DEFAULT_URL = 'https://kopi.ruqqq.workers.dev';
+  // The catalog the device browses. JSON, not the Atom feed: the reader's
+  // XML-list mode re-sorts entries alphabetically by title, and a Kopi title
+  // ends in the issue date, so the feed would render oldest-first. Keep in
+  // step with browse.url in device.json.
+  const LIST_PATH = '/opds/list';
+  const LIST_PAGE_SIZE = 16;
 
   container.innerHTML =
     '<h2>Kopi</h2>' +
@@ -22,7 +28,7 @@ CrossPoint.registerPlugin(async (container, api) => {
     '<button type="button" class="btn-small" id="kopi-test">Test</button> ' +
     '<button type="button" class="btn-small" id="kopi-clear" style="display:none">Clear</button>' +
     '</div>' +
-    '<p style="color:#666">Enter your Kopi server address — the plugin adds /opds itself. ' +
+    '<p style="color:#666">Enter your Kopi server address — the plugin adds the catalog path itself. ' +
     'Use the OPDS username and password from your Kopi account, not your login. ' +
     'Credentials are stored in plain text on the SD card, because the reader needs ' +
     'them to authenticate each download.</p>';
@@ -42,7 +48,7 @@ CrossPoint.registerPlugin(async (container, api) => {
   }
 
   // Accept the origin, a trailing slash, or a pasted feed URL — device.json
-  // always appends /opds itself.
+  // always appends the catalog path itself.
   function normalizeUrl(raw) {
     let url = raw.trim().replace(/\s+/g, '');
     url = url.replace(/\/+$/, '');
@@ -84,27 +90,41 @@ CrossPoint.registerPlugin(async (container, api) => {
   // `rejected` distinguishes "the server said no" from "we could not ask",
   // because only the former should block a save.
   async function verify(cfg) {
-    // One plain GET of the feed. Kopi records a download row for every EPUB
-    // fetch, so never probe the acquisition links from here.
-    const r = await api.relay('GET', cfg.url + '/opds',
-      { Authorization: 'Basic ' + cfg.auth, Accept: 'application/atom+xml' }, '');
+    // Probe /opds/list, not the Atom feed: that is the exact request the
+    // device's browse screen makes, so a server too old to answer it fails
+    // here with a clear message instead of as an empty list on the reader.
+    // Kopi records a download row for every EPUB fetch, so never probe the
+    // acquisition links from here.
+    const r = await api.relay('GET', cfg.url + LIST_PATH,
+      { Authorization: 'Basic ' + cfg.auth, Accept: 'application/json' }, '');
     if (r.status === 401 || r.status === 403) {
       return { ok: false, rejected: true,
         message: 'Username or password is incorrect (HTTP ' + r.status + ').' };
     }
     if (r.status === 404) {
       return { ok: false, rejected: true,
-        message: 'No OPDS feed at ' + cfg.url + '/opds (HTTP 404). Check the server URL.' };
+        message: 'No Kopi catalog at ' + cfg.url + LIST_PATH + ' (HTTP 404). Check the '
+          + 'server URL — and that the server is new enough to serve this plugin.' };
     }
     if (r.status >= 200 && r.status < 300) {
-      const found = (r.body || '').match(/<entry\b/g);
-      const count = found ? found.length : 0;
-      // The relay truncates response bodies at 32 KB, so a large feed may
-      // report fewer entries than the server actually returned.
+      let items = null;
+      try {
+        items = JSON.parse(r.body || '{}').items;
+      } catch (e) {
+        return { ok: false, rejected: true,
+          message: 'The server answered, but not with a Kopi catalog. Check the server URL.' };
+      }
+      if (!Array.isArray(items)) {
+        return { ok: false, rejected: true,
+          message: 'The server answered, but not with a Kopi catalog. Check the server URL.' };
+      }
+      if (!items.length) return { ok: true, rejected: false, message: 'Credentials OK, but no issues yet.' };
+      // The list is one page, so a full page means "at least this many".
+      const more = items.length > LIST_PAGE_SIZE;
+      const count = more ? LIST_PAGE_SIZE : items.length;
       return { ok: true, rejected: false,
-        message: count
-          ? 'Credentials OK. Found ' + count + ' issue' + (count === 1 ? '' : 's') + '.'
-          : 'Credentials OK, but the feed is empty.' };
+        message: 'Credentials OK. Found ' + count + (more ? '+' : '')
+          + ' issue' + (count === 1 ? '' : 's') + '.' };
     }
     return { ok: false, rejected: false,
       message: 'Could not reach the server (HTTP ' + (r.status || r.error) + ').' };

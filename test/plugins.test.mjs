@@ -123,7 +123,7 @@ async function renderKopi({ relay, existing } = {}) {
   return { document, writes };
 }
 
-const OK_FEED = async () => ({ status: 200, body: '<feed><entry/></feed>', headers: [] });
+const OK_FEED = async () => ({ status: 200, body: '{"page":1,"items":[{"title":"Kopi","url":"u"}]}', headers: [] });
 
 test('kopi prefills a default server URL when nothing is configured', async () => {
   const { document } = await renderKopi();
@@ -189,24 +189,19 @@ test('kopi normalizes a pasted feed URL and stores basic credentials', async () 
   assert.equal(cfg.user, 'reader');
   assert.equal(cfg.pass, 'abcde-fghij-klmno');
   assert.equal(cfg.auth, Buffer.from('reader:abcde-fghij-klmno').toString('base64'));
-  // device.json appends /opds itself, so the saved URL must be the bare origin.
+  // device.json appends the catalog path itself, so the saved URL must be the bare origin.
   assert.equal(document.elements['kopi-url'].value, 'https://kopi.example.com');
 });
 
-test('kopi reports feed entry count and authentication failures', async () => {
-  const feed =
-    '<?xml version="1.0" encoding="UTF-8"?>' +
-    '<feed xmlns="http://www.w3.org/2005/Atom">' +
-    '<entry><title>Kopi Singapore - 2026-08-14</title>' +
-    '<link rel="http://opds-spec.org/acquisition" href="https://kopi.example.com/opds/issue/2.epub"/>' +
-    '</entry>' +
-    '<entry><title>Kopi Singapore - 2026-08-13</title>' +
-    '<link rel="http://opds-spec.org/acquisition" href="https://kopi.example.com/opds/issue/1.epub"/>' +
-    '</entry></feed>';
+test('kopi reports issue count and authentication failures', async () => {
+  const list = JSON.stringify({ page: 1, items: [
+    { id: 'issue-2', title: 'Kopi Singapore - 2026-08-14', url: 'https://kopi.example.com/opds/issue/2.epub' },
+    { id: 'issue-1', title: 'Kopi Singapore - 2026-08-13', url: 'https://kopi.example.com/opds/issue/1.epub' },
+  ] });
   const calls = [];
   const relay = async (method, url, headers) => {
     calls.push({ method, url, headers });
-    return { status: 200, body: feed, headers: [] };
+    return { status: 200, body: list, headers: [] };
   };
 
   const ok = await renderKopi({ relay, existing: '{"url":"https://kopi.example.com","user":"reader","pass":"pw","auth":"cmVhZGVyOnB3"}' });
@@ -214,7 +209,9 @@ test('kopi reports feed entry count and authentication failures', async () => {
   await ok.document.elements['kopi-test'].onclick();
 
   assert.equal(calls[0].method, 'GET');
-  assert.equal(calls[0].url, 'https://kopi.example.com/opds');
+  // The test button must probe exactly what the device browses, or a server
+  // that cannot serve the reader still passes setup.
+  assert.equal(calls[0].url, 'https://kopi.example.com/opds/list');
   assert.equal(calls[0].headers.Authorization, 'Basic ' + Buffer.from('reader:pw').toString('base64'));
   assert.match(ok.document.elements['kopi-status'].textContent, /Found 2 issues/);
 
@@ -225,6 +222,35 @@ test('kopi reports feed entry count and authentication failures', async () => {
   await denied.document.elements['kopi-test'].onclick();
   assert.match(denied.document.elements['kopi-status'].textContent, /Username or password is incorrect/);
 });
+
+test('kopi refuses a server too old to serve the catalog the device browses', async () => {
+  // An older Kopi deployment still answers /opds but has no /opds/list. Saving
+  // that would leave the reader with an empty browse screen and no explanation.
+  const { document, writes } = await renderKopi({
+    relay: async () => ({ status: 404, body: 'Not Found', headers: [] }),
+  });
+  document.elements['kopi-user'].value = 'reader';
+  document.elements['kopi-pass'].value = 'pw';
+  await document.elements['kopi-save'].onclick();
+
+  assert.match(document.elements['kopi-status'].textContent, /\/opds\/list/);
+  assert.equal(writes.length, 0);
+});
+
+test('kopi browses the catalog as json, so the device keeps the server order', async () => {
+  // The reader's XML-list mode sorts alphabetically by title, and a Kopi title
+  // ends in the issue date — under "xml" a newest-first catalog renders
+  // oldest-first, and that mode also drops paging entirely.
+  const device = JSON.parse(await readFile(new URL('../kopi/device.json', import.meta.url), 'utf8'));
+  assert.equal(device.browse.format, 'json');
+  assert.equal(device.browse.items, 'items');
+  assert.equal(device.browse.fields.url, 'url');
+  assert.match(device.browse.url, /\/opds\/list\?page=\{page\}&limit=\{limit\}/);
+  // JSON items carry the file URL but, unlike the XML mode, nothing defaults
+  // the download template to it.
+  assert.equal(device.download.url, '{url}');
+});
+
 // Appended to crosspoint-plugins/test/plugins.test.mjs
 
 const LIBBY_IDS = [

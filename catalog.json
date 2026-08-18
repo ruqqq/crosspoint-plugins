@@ -6,7 +6,7 @@
       "title": "Kopi",
       "description": "Read your Kopi briefings on the device.",
       "author": "ruqqq",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "base": "https://raw.githubusercontent.com/ruqqq/crosspoint-plugins/main/kopi/",
       "files": [
         "manifest.json",
